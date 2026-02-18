@@ -11,6 +11,7 @@
     "playwright:install": "playwright install chromium",
     "debug:wizard": "node debug-wizard-run.js",
     "full-test": "node full-test.js",
+    "full-test:report": "node full-test-with-report.js",
     "search:once": "node run-search-once.js"
   },
   "dependencies": {
