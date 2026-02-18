@@ -226,7 +226,7 @@ function scoreIterationResults(
 
   for (const item of rawResults) {
     const result = toDomainResult(item, input.yearlyBudget);
-    if (!result.available) {
+    if (!result.available || result.overBudget) {
       continue;
     }
 
@@ -255,7 +255,7 @@ function scoreIterationResults(
   return {
     ranked: sorted,
     availableCount: sorted.length,
-    withinBudgetCount: sorted.filter((row) => !row.overBudget).length,
+    withinBudgetCount: sorted.length,
     averageOverallScore,
     topDomain: top?.domain,
     topScore: top?.overallScore,
@@ -436,7 +436,7 @@ export async function runSearchJob(jobId: string): Promise<void> {
           });
 
           const availabilityMap = await checkAvailabilityBulk(freshCandidates.map((candidate) => candidate.domain));
-          let batchAvailableCount = 0;
+          let batchQualifiedCount = 0;
 
           for (const candidate of freshCandidates) {
             const availability = availabilityMap.get(candidate.domain);
@@ -444,8 +444,7 @@ export async function runSearchJob(jobId: string): Promise<void> {
               continue;
             }
 
-            batchAvailableCount += 1;
-            loopRawAvailable.push({
+            const rawAvailable: RawDomainResult = {
               domain: candidate.domain,
               sourceName: candidate.sourceName,
               isNamelixPremium: candidate.isNamelixPremium,
@@ -455,14 +454,22 @@ export async function runSearchJob(jobId: string): Promise<void> {
               currency: availability.currency,
               period: availability.period,
               reason: availability.reason,
-            });
+            };
+
+            const priced = toDomainResult(rawAvailable, plan.input.yearlyBudget);
+            if (priced.overBudget) {
+              continue;
+            }
+
+            batchQualifiedCount += 1;
+            loopRawAvailable.push(rawAvailable);
 
             if (loopRawAvailable.length >= plan.input.maxNames) {
               break;
             }
           }
 
-          stalledBatches = batchAvailableCount === 0 ? stalledBatches + 1 : 0;
+          stalledBatches = batchQualifiedCount === 0 ? stalledBatches + 1 : 0;
         }
 
         const liveState: LoopRunState = {
@@ -506,7 +513,7 @@ export async function runSearchJob(jobId: string): Promise<void> {
         }
 
         if (stalledBatches >= LOOP_MAX_STALLED_BATCHES) {
-          skipReason = `No newly available domains across ${LOOP_MAX_STALLED_BATCHES} consecutive batches.`;
+          skipReason = `No newly qualifying domains across ${LOOP_MAX_STALLED_BATCHES} consecutive batches.`;
           break;
         }
       }

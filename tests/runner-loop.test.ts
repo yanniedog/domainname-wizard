@@ -128,6 +128,8 @@ describe("runSearchJob looped aggregation", () => {
 
     expect(finished?.status).toBe("done");
     expect(finished?.results?.allRanked.every((row) => row.available)).toBe(true);
+    expect(finished?.results?.allRanked.every((row) => !row.overBudget)).toBe(true);
+    expect(finished?.results?.overBudget).toHaveLength(0);
     expect(finished?.results?.unavailable).toHaveLength(0);
     expect(finished?.results?.loopSummaries).toHaveLength(2);
 
@@ -137,6 +139,71 @@ describe("runSearchJob looped aggregation", () => {
       expect(summary.quotaMet).toBe(true);
       expect(summary.limitHit).toBe(false);
     }
+  });
+
+  it("does not count overbudget domains toward quota", async () => {
+    let scrapeCall = 0;
+    scrapeNamelixMock.mockImplementation(async () => {
+      scrapeCall += 1;
+      if (scrapeCall === 1) {
+        return [{ businessName: "Expenso" }];
+      }
+
+      return [{ businessName: "Budgetly" }];
+    });
+
+    checkAvailabilityBulkMock.mockImplementation(async (domains) => {
+      const map = new Map<string, GoDaddyAvailability>();
+      for (const domain of domains) {
+        if (domain === "expenso.com") {
+          map.set(domain, {
+            domain,
+            available: true,
+            definitive: true,
+            priceMicros: 200_000_000,
+            currency: "USD",
+            period: 1,
+          });
+          continue;
+        }
+
+        map.set(domain, {
+          domain,
+          available: true,
+          definitive: true,
+          priceMicros: 20_000_000,
+          currency: "USD",
+          period: 1,
+        });
+      }
+
+      return map;
+    });
+
+    const job = createJob({
+      keywords: "budget planner",
+      description: "pricing app",
+      style: "default",
+      randomness: "medium",
+      blacklist: "",
+      maxLength: 12,
+      tld: "com",
+      maxNames: 1,
+      yearlyBudget: 50,
+      loopCount: 1,
+    });
+
+    await runSearchJob(job.id);
+    const finished = getJob(job.id);
+    const summary = finished?.results?.loopSummaries[0];
+
+    expect(finished?.status).toBe("done");
+    expect(summary?.quotaMet).toBe(true);
+    expect(summary?.availableCount).toBe(1);
+    expect(summary?.consideredCount).toBeGreaterThanOrEqual(2);
+    expect(finished?.results?.allRanked).toHaveLength(1);
+    expect(finished?.results?.allRanked[0]?.domain).toBe("budgetly.com");
+    expect(finished?.results?.overBudget).toHaveLength(0);
   });
 
   it("flags limit hit at 251 considered names but keeps partial available results", async () => {

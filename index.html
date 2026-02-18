@@ -197,7 +197,7 @@
         rows.forEach(function (r) {
           var drivers = (r.valueDrivers || []).map(function (d) { return d.component + " (" + Number(d.impact || 0).toFixed(1) + ")"; }).join(", ") || "-";
           var detractors = (r.valueDetractors || []).map(function (d) { return d.component + " (" + Number(d.impact || 0).toFixed(1) + ")"; }).join(", ") || "-";
-          h += "<tr><td>" + escapeHtml(r.domain) + "</td><td>" + (r.available ? "Available" : "Unavailable") + "</td><td>" + formatMoney(r.price, r.currency) + "</td><td>" + score(r.marketabilityScore) + "</td><td>" + score(r.financialValueScore) + "</td><td>" + score(r.overallScore) + "</td><td>" + (r.syllableCount || 0) + "</td><td>" + (r.labelLength || 0) + "</td><td>" + (r.timesDiscovered || 0) + "</td><td>" + (r.firstSeenLoop || "-") + "</td><td>" + (r.lastSeenLoop || "-") + "</td><td>" + escapeHtml(drivers) + "</td><td>" + escapeHtml(detractors) + "</td></tr>";
+          h += "<tr><td>" + escapeHtml(r.domain) + "</td><td>Available</td><td>" + formatMoney(r.price, r.currency) + "</td><td>" + score(r.marketabilityScore) + "</td><td>" + score(r.financialValueScore) + "</td><td>" + score(r.overallScore) + "</td><td>" + (r.syllableCount || 0) + "</td><td>" + (r.labelLength || 0) + "</td><td>" + (r.timesDiscovered || 0) + "</td><td>" + (r.firstSeenLoop || "-") + "</td><td>" + (r.lastSeenLoop || "-") + "</td><td>" + escapeHtml(drivers) + "</td><td>" + escapeHtml(detractors) + "</td></tr>";
         });
         return h + "</tbody></table></div>";
       }
@@ -232,7 +232,6 @@
         html += "<label>Sort By <select id=\"all-sort\"><option value=\"marketability\">marketability</option><option value=\"financialValue\">financialValue</option><option value=\"alphabetical\">alphabetical</option><option value=\"syllableCount\">syllableCount</option><option value=\"labelLength\">labelLength</option></select></label>";
         html += renderRankedTable(ranked);
         html += "<h3>Within Budget (" + (results.withinBudget || []).length + ")</h3>" + renderBudgetTable(results.withinBudget || []);
-        html += "<h3>Over Budget (" + (results.overBudget || []).length + ")</h3>" + renderBudgetTable(results.overBudget || []);
         html += "<h3>Loop Summaries (" + (results.loopSummaries || []).length + ")</h3>" + renderLoopSummary(results.loopSummaries || []);
         resultsEl.innerHTML = html;
 

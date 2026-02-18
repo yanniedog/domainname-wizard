@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { classifyDomainResults } from "@/lib/search/classify";
 
 describe("budget classification", () => {
-  it("splits within-budget, over-budget, and unavailable buckets", () => {
+  it("keeps only available within-budget domains", () => {
     const results = classifyDomainResults(
       [
         {
@@ -37,13 +37,12 @@ describe("budget classification", () => {
     );
 
     expect(results.withinBudget).toHaveLength(1);
-    expect(results.overBudget).toHaveLength(1);
-    expect(results.unavailable).toHaveLength(1);
+    expect(results.overBudget).toHaveLength(0);
+    expect(results.unavailable).toHaveLength(0);
+    expect(results.allRanked).toHaveLength(1);
 
     expect(results.withinBudget[0]?.domain).toBe("alpha.com");
-    expect(results.overBudget[0]?.domain).toBe("beta.com");
-    expect(results.overBudget[0]?.isNamelixPremium).toBe(true);
-    expect(results.unavailable[0]?.domain).toBe("gamma.com");
+    expect(results.allRanked[0]?.domain).toBe("alpha.com");
   });
 
   it("sorts available results by lowest price first", () => {

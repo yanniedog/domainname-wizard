@@ -171,7 +171,7 @@ function RankedTable({ rows }: { rows: RankedDomainResult[] }) {
           {rows.map((row) => (
             <tr key={`${row.domain}:${row.firstSeenLoop}:${row.lastSeenLoop}`}>
               <td>{row.domain}</td>
-              <td>{row.available ? "Available" : "Unavailable"}</td>
+              <td>Available</td>
               <td>{formatMoney(row.price, row.currency)}</td>
               <td><ScoreBadge score={row.marketabilityScore} /></td>
               <td><ScoreBadge score={row.financialValueScore} /></td>
@@ -201,7 +201,6 @@ export default function Page() {
   const [jobId, setJobId] = useState<string | null>(null);
   const [job, setJob] = useState<SearchJobResponse | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
-  const [showOverBudget, setShowOverBudget] = useState(false);
   const [sortMode, setSortMode] = useState<DomainSortMode>("marketability");
 
   useEffect(() => {
@@ -264,7 +263,6 @@ export default function Page() {
     setLoading(true);
     setJob(null);
     setJobId(null);
-    setShowOverBudget(false);
     setSortMode("marketability");
 
     try {
@@ -470,14 +468,6 @@ export default function Page() {
 
               <h3>Within Budget ({job.results.withinBudget.length})</h3>
               <BudgetTable rows={job.results.withinBudget} />
-
-              <h3>
-                Over Budget ({job.results.overBudget.length})
-                <button type="button" onClick={() => setShowOverBudget((previous) => !previous)}>
-                  {showOverBudget ? "Hide" : "Show"}
-                </button>
-              </h3>
-              {showOverBudget && <BudgetTable rows={job.results.overBudget} />}
 
               <h3>Loop Summaries ({job.results.loopSummaries.length})</h3>
               <div className="table-wrap">
