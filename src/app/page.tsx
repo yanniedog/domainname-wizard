@@ -2,25 +2,29 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 
-import { RANDOMNESS_VALUES, STYLE_VALUES, type DomainResult } from "@/lib/types";
+import { sortRankedDomains, type DomainSortMode } from "@/lib/search/sort";
+import {
+  RANDOMNESS_VALUES,
+  STYLE_VALUES,
+  type RankedDomainResult,
+  type SearchResults,
+} from "@/lib/types";
 
 type SearchStatus = "queued" | "running" | "done" | "failed";
-type SearchPhase = "namelix" | "godaddy" | "finalize" | null;
+type SearchPhase = "namelix" | "godaddy" | "looping" | "finalize" | null;
 
 interface SearchJobResponse {
   id: string;
   status: SearchStatus;
   phase: SearchPhase;
   progress: number;
+  currentLoop?: number;
+  totalLoops?: number;
   error?: {
     code: string;
     message: string;
   };
-  results?: {
-    withinBudget: DomainResult[];
-    overBudget: DomainResult[];
-    unavailable: DomainResult[];
-  };
+  results?: SearchResults;
 }
 
 interface SearchFormState {
@@ -33,6 +37,7 @@ interface SearchFormState {
   tld: string;
   maxNames: number;
   yearlyBudget: number;
+  loopCount: number;
 }
 
 const initialFormState: SearchFormState = {
@@ -45,7 +50,16 @@ const initialFormState: SearchFormState = {
   tld: "com",
   maxNames: 100,
   yearlyBudget: 50,
+  loopCount: 10,
 };
+
+const DOMAIN_SORT_OPTIONS: DomainSortMode[] = [
+  "marketability",
+  "financialValue",
+  "alphabetical",
+  "syllableCount",
+  "labelLength",
+];
 
 function formatMoney(value?: number, currency?: string): string {
   if (typeof value !== "number") {
@@ -72,6 +86,10 @@ function phaseLabel(status: SearchStatus, phase: SearchPhase): string {
     return "Failed";
   }
 
+  if (phase === "looping") {
+    return "Iterative tuning";
+  }
+
   if (phase === "namelix") {
     return "Generating names";
   }
@@ -87,18 +105,24 @@ function phaseLabel(status: SearchStatus, phase: SearchPhase): string {
   return "Running";
 }
 
-function ResultTable({ rows }: { rows: DomainResult[] }) {
+function ScoreBadge({ score }: { score: number }) {
+  return <span>{score.toFixed(1)}</span>;
+}
+
+function BudgetTable({ rows }: { rows: RankedDomainResult[] }) {
   return (
     <div className="table-wrap">
       <table>
         <thead>
           <tr>
             <th>Domain</th>
-            <th>Name</th>
+            <th>Price</th>
             <th>Available</th>
             <th>Definitive</th>
-            <th>Price</th>
             <th>Premium</th>
+            <th>Marketability</th>
+            <th>Financial</th>
+            <th>Overall</th>
             <th>Reason</th>
           </tr>
         </thead>
@@ -106,12 +130,63 @@ function ResultTable({ rows }: { rows: DomainResult[] }) {
           {rows.map((row) => (
             <tr key={`${row.domain}:${row.sourceName}`}>
               <td>{row.domain}</td>
-              <td>{row.sourceName}</td>
+              <td>{formatMoney(row.price, row.currency)}</td>
               <td>{row.available ? "Yes" : "No"}</td>
               <td>{row.definitive ? "Yes" : "No"}</td>
-              <td>{formatMoney(row.price, row.currency)}</td>
               <td>{row.isNamelixPremium ? "Yes" : "No"}</td>
+              <td><ScoreBadge score={row.marketabilityScore} /></td>
+              <td><ScoreBadge score={row.financialValueScore} /></td>
+              <td><ScoreBadge score={row.overallScore} /></td>
               <td>{row.reason ?? "-"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function RankedTable({ rows }: { rows: RankedDomainResult[] }) {
+  return (
+    <div className="table-wrap">
+      <table>
+        <thead>
+          <tr>
+            <th>Domain</th>
+            <th>Availability</th>
+            <th>Price</th>
+            <th>Marketability</th>
+            <th>Financial</th>
+            <th>Overall</th>
+            <th>Syllables</th>
+            <th>Label Len</th>
+            <th>Discovered</th>
+            <th>First Loop</th>
+            <th>Last Loop</th>
+            <th>Value Drivers</th>
+            <th>Value Detractors</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map((row) => (
+            <tr key={`${row.domain}:${row.firstSeenLoop}:${row.lastSeenLoop}`}>
+              <td>{row.domain}</td>
+              <td>{row.available ? "Available" : "Unavailable"}</td>
+              <td>{formatMoney(row.price, row.currency)}</td>
+              <td><ScoreBadge score={row.marketabilityScore} /></td>
+              <td><ScoreBadge score={row.financialValueScore} /></td>
+              <td><ScoreBadge score={row.overallScore} /></td>
+              <td>{row.syllableCount}</td>
+              <td>{row.labelLength}</td>
+              <td>{row.timesDiscovered}</td>
+              <td>{row.firstSeenLoop}</td>
+              <td>{row.lastSeenLoop}</td>
+              <td>
+                {row.valueDrivers.map((item) => `${item.component} (${item.impact.toFixed(1)})`).join(", ") || "-"}
+              </td>
+              <td>
+                {row.valueDetractors.map((item) => `${item.component} (${item.impact.toFixed(1)})`).join(", ") || "-"}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -128,6 +203,7 @@ export default function Page() {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [showOverBudget, setShowOverBudget] = useState(false);
   const [showUnavailable, setShowUnavailable] = useState(false);
+  const [sortMode, setSortMode] = useState<DomainSortMode>("marketability");
 
   useEffect(() => {
     if (!jobId) {
@@ -179,6 +255,10 @@ export default function Page() {
     return job?.status === "done" || job?.status === "failed";
   }, [job]);
 
+  const allRankedRows = useMemo(() => {
+    return sortRankedDomains(job?.results?.allRanked ?? [], sortMode);
+  }, [job?.results?.allRanked, sortMode]);
+
   const onSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setSubmitError(null);
@@ -187,6 +267,7 @@ export default function Page() {
     setJobId(null);
     setShowOverBudget(false);
     setShowUnavailable(false);
+    setSortMode("marketability");
 
     try {
       const response = await fetch("/api/searches", {
@@ -330,6 +411,22 @@ export default function Page() {
             />
           </label>
 
+          <label>
+            Loop Count
+            <input
+              type="number"
+              min={1}
+              max={25}
+              value={form.loopCount}
+              onChange={(event) =>
+                setForm((previous) => ({
+                  ...previous,
+                  loopCount: Number(event.target.value) || previous.loopCount,
+                }))
+              }
+            />
+          </label>
+
           <button type="submit" disabled={loading}>
             {loading ? "Starting..." : "Start Search"}
           </button>
@@ -345,6 +442,9 @@ export default function Page() {
             <strong>{phaseLabel(job.status, job.phase)}</strong>
             {" "}
             ({job.progress}%)
+            {typeof job.currentLoop === "number" && typeof job.totalLoops === "number"
+              ? ` | Loop ${job.currentLoop}/${job.totalLoops}`
+              : ""}
           </p>
           <div className="progress">
             <div style={{ width: `${job.progress}%` }} />
@@ -354,8 +454,24 @@ export default function Page() {
 
           {job.results && (
             <>
+              <h3>All Discovered Domains ({job.results.allRanked.length})</h3>
+              <label>
+                Sort By
+                <select
+                  value={sortMode}
+                  onChange={(event) => setSortMode(event.target.value as DomainSortMode)}
+                >
+                  {DOMAIN_SORT_OPTIONS.map((mode) => (
+                    <option key={mode} value={mode}>
+                      {mode}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <RankedTable rows={allRankedRows} />
+
               <h3>Within Budget ({job.results.withinBudget.length})</h3>
-              <ResultTable rows={job.results.withinBudget} />
+              <BudgetTable rows={job.results.withinBudget} />
 
               <h3>
                 Over Budget ({job.results.overBudget.length})
@@ -363,7 +479,7 @@ export default function Page() {
                   {showOverBudget ? "Hide" : "Show"}
                 </button>
               </h3>
-              {showOverBudget && <ResultTable rows={job.results.overBudget} />}
+              {showOverBudget && <BudgetTable rows={job.results.overBudget} />}
 
               <h3>
                 Unavailable / Unknown ({job.results.unavailable.length})
@@ -371,7 +487,45 @@ export default function Page() {
                   {showUnavailable ? "Hide" : "Show"}
                 </button>
               </h3>
-              {showUnavailable && <ResultTable rows={job.results.unavailable} />}
+              {showUnavailable && <BudgetTable rows={job.results.unavailable} />}
+
+              <h3>Loop Summaries ({job.results.loopSummaries.length})</h3>
+              <div className="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>Loop</th>
+                      <th>Keywords</th>
+                      <th>Description</th>
+                      <th>Style</th>
+                      <th>Randomness</th>
+                      <th>Mutation</th>
+                      <th>Discovered</th>
+                      <th>Available</th>
+                      <th>Within Budget</th>
+                      <th>Avg Score</th>
+                      <th>Top Domain</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {job.results.loopSummaries.map((summary) => (
+                      <tr key={summary.loop}>
+                        <td>{summary.loop}</td>
+                        <td>{summary.keywords}</td>
+                        <td>{summary.description || "-"}</td>
+                        <td>{summary.style}</td>
+                        <td>{summary.randomness}</td>
+                        <td>{summary.mutationIntensity}</td>
+                        <td>{summary.discoveredCount}</td>
+                        <td>{summary.availableCount}</td>
+                        <td>{summary.withinBudgetCount}</td>
+                        <td>{summary.averageOverallScore.toFixed(1)}</td>
+                        <td>{summary.topDomain ?? "-"}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
             </>
           )}
 
@@ -381,4 +535,3 @@ export default function Page() {
     </main>
   );
 }
-

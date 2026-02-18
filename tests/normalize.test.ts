@@ -6,6 +6,8 @@ import {
   normalizeBusinessNameToLabel,
   normalizeTld,
 } from "@/lib/domain/normalize";
+import { buildDomainCandidates } from "@/lib/search/runner";
+import type { SearchRequest } from "@/lib/types";
 
 describe("domain normalization", () => {
   it("normalizes unicode and punctuation to dns-safe labels", () => {
@@ -26,6 +28,29 @@ describe("domain normalization", () => {
 
   it("rejects invalid tld", () => {
     expect(normalizeTld("***")).toBeNull();
+  });
+
+  it("filters generated labels that exceed maxLength", () => {
+    const input: SearchRequest = {
+      keywords: "alpha brand",
+      description: "",
+      style: "default",
+      randomness: "medium",
+      blacklist: "",
+      maxLength: 8,
+      tld: "com",
+      maxNames: 10,
+      yearlyBudget: 100,
+      loopCount: 1,
+    };
+
+    const { candidates, invalid } = buildDomainCandidates(input, [
+      { businessName: "Very Long Brand Name" },
+      { businessName: "QuickFox" },
+    ]);
+
+    expect(candidates.map((item) => item.domain)).toEqual(["quickfox.com"]);
+    expect(invalid[0]?.reason).toContain("exceeds maxLength");
   });
 });
 

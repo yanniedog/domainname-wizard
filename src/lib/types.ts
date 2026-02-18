@@ -10,9 +10,11 @@ export const STYLE_VALUES = [
 ] as const;
 
 export const RANDOMNESS_VALUES = ["low", "medium", "high"] as const;
+export const MUTATION_INTENSITY_VALUES = ["low", "medium", "high"] as const;
 
 export type StyleValue = (typeof STYLE_VALUES)[number];
 export type RandomnessValue = (typeof RANDOMNESS_VALUES)[number];
+export type MutationIntensityValue = (typeof MUTATION_INTENSITY_VALUES)[number];
 
 export interface SearchRequest {
   keywords: string;
@@ -24,6 +26,7 @@ export interface SearchRequest {
   tld: string;
   maxNames: number;
   yearlyBudget: number;
+  loopCount: number;
 }
 
 export interface NamelixLogo {
@@ -51,14 +54,62 @@ export interface DomainResult extends RawDomainResult {
   overBudget: boolean;
 }
 
+export interface ValueDriver {
+  component: string;
+  impact: number;
+  detail: string;
+}
+
+export interface RankedDomainResult extends DomainResult {
+  marketabilityScore: number;
+  financialValueScore: number;
+  overallScore: number;
+  syllableCount: number;
+  labelLength: number;
+  valueDrivers: ValueDriver[];
+  valueDetractors: ValueDriver[];
+  firstSeenLoop: number;
+  lastSeenLoop: number;
+  timesDiscovered: number;
+}
+
+export interface LoopSummary {
+  loop: number;
+  keywords: string;
+  description: string;
+  style: StyleValue;
+  randomness: RandomnessValue;
+  mutationIntensity: MutationIntensityValue;
+  discoveredCount: number;
+  availableCount: number;
+  withinBudgetCount: number;
+  averageOverallScore: number;
+  topDomain?: string;
+  topScore?: number;
+}
+
+export interface TuningStep {
+  loop: number;
+  sourceLoop?: number;
+  keywords: string;
+  description: string;
+  selectedStyle: StyleValue;
+  selectedRandomness: RandomnessValue;
+  selectedMutationIntensity: MutationIntensityValue;
+  reward: number;
+}
+
 export interface SearchResults {
-  withinBudget: DomainResult[];
-  overBudget: DomainResult[];
-  unavailable: DomainResult[];
+  withinBudget: RankedDomainResult[];
+  overBudget: RankedDomainResult[];
+  unavailable: RankedDomainResult[];
+  allRanked: RankedDomainResult[];
+  loopSummaries: LoopSummary[];
+  tuningHistory: TuningStep[];
 }
 
 export type JobStatus = "queued" | "running" | "done" | "failed";
-export type JobPhase = "namelix" | "godaddy" | "finalize" | null;
+export type JobPhase = "namelix" | "godaddy" | "looping" | "finalize" | null;
 
 export interface JobError {
   code: string;
@@ -75,6 +126,8 @@ export interface SearchJob {
   updatedAt: number;
   startedAt?: number;
   completedAt?: number;
+  currentLoop?: number;
+  totalLoops?: number;
   results?: SearchResults;
   error?: JobError;
 }

@@ -13,6 +13,7 @@ const minimalSearchRequest: SearchRequest = {
   tld: "com",
   maxNames: 5,
   yearlyBudget: 50,
+  loopCount: 1,
 };
 
 describe("Namelix scraper", () => {

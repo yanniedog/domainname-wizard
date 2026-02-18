@@ -1,22 +1,38 @@
 # Domainname Wizard
 
-Namelix-to-GoDaddy budget domain finder.
+Namelix-to-GoDaddy iterative domain optimizer.
 
 ## Features
 
 - Collects Namelix-style naming preferences from a web form.
 - Uses Playwright to run Namelix generation and scrape generated names.
 - Normalizes names into domain candidates (`<name>.<tld>`).
+- Enforces `maxLength` in backend before availability checks and scoring.
 - Checks domain availability in bulk using official GoDaddy Domains API.
-- Applies user yearly budget filtering:
-  - Shows in-budget available domains first.
-  - Hides over-budget domains by default (revealable).
-  - Keeps unavailable/unknown domains in a collapsed section.
+- Runs iterative AI-style tuning loops (`loopCount`, default `10`, max `25`):
+  - Evolutionary keyword/description mutation.
+  - Epsilon-greedy bandit selection for style/randomness/mutation intensity.
+  - Local persistent learning model in `data/optimizer-state.json`.
+- Scores every discovered domain with:
+  - `marketabilityScore` (memorability/brandability factors).
+  - `financialValueScore` (availability/price/budget factors).
+  - `overallScore` (price-aware-first blend).
+- Produces deduped cross-loop ranking (`allRanked`) with metadata:
+  - first/last seen loop
+  - times discovered
+  - value drivers and detractors
+- Supports final ranking/sorting by:
+  - marketability
+  - financial value
+  - alphabetical
+  - syllable count
+  - label length
+- Keeps budget buckets (`withinBudget`, `overBudget`, `unavailable`) from aggregated cross-loop results.
 - Uses async jobs with polling API endpoints and in-memory TTL storage.
 - Includes throttling protections:
   - Namelix queue concurrency `1` with cooldown + jitter.
   - GoDaddy queue concurrency `3`, max `30` requests/minute.
-- Includes unit tests for normalization, budget classification, and chunking.
+- Includes unit and integration tests for normalization, scoring, sorting, optimizer state, and loop aggregation.
 
 ## Environment
 
@@ -61,7 +77,12 @@ Open **`index.html`** in the project root directly in a browser or host it on an
 ## API
 
 - `POST /api/searches` -> starts async job, returns `{ jobId, status }`
-- `GET /api/searches/:jobId` -> returns job status/progress/results
+- `GET /api/searches/:jobId` -> returns job status/progress/results plus `currentLoop` and `totalLoops`
+
+### POST payload highlights
+
+- `loopCount`: integer `1..25` (default `10`)
+- `maxLength`: strict backend-enforced label length cap (`5..25`)
 
 ## Validate
 

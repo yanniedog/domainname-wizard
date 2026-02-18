@@ -62,6 +62,7 @@ async function main() {
     tld: "com",
     maxNames: 10,
     yearlyBudget: 60,
+    loopCount: 1,
   });
 
   const postRes = await request("POST", "/api/searches", body);

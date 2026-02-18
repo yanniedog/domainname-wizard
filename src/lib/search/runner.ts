@@ -1,4 +1,7 @@
-import { buildDomainFromBusinessName } from "@/lib/domain/normalize";
+import {
+  normalizeBusinessNameToLabel,
+  normalizeTld,
+} from "@/lib/domain/normalize";
 import {
   GoDaddyApiError,
   GoDaddyAuthError,
@@ -15,13 +18,34 @@ import {
   setCachedSearchResult,
 } from "@/lib/jobs/store";
 import { NamelixScrapeError, scrapeNamelix } from "@/lib/namelix/scraper";
-import { classifyDomainResults } from "@/lib/search/classify";
-import type { JobError, RawDomainResult, SearchRequest } from "@/lib/types";
+import { classifyRankedResults } from "@/lib/search/classify";
+import { loadOptimizerModelState, saveOptimizerModelState } from "@/lib/search/model-store";
+import { DomainSearchOptimizer } from "@/lib/search/optimizer";
+import { scoreDomainResult, scoreRewardFromRankedScores } from "@/lib/search/scoring";
+import { sortRankedDomains } from "@/lib/search/sort";
+import type {
+  DomainResult,
+  JobError,
+  LoopSummary,
+  RankedDomainResult,
+  RawDomainResult,
+  SearchRequest,
+  TuningStep,
+} from "@/lib/types";
 
 interface DomainCandidate {
   domain: string;
   sourceName: string;
   isNamelixPremium: boolean;
+}
+
+interface IterationResults {
+  ranked: RankedDomainResult[];
+  availableCount: number;
+  withinBudgetCount: number;
+  averageOverallScore: number;
+  topDomain?: string;
+  topScore?: number;
 }
 
 function buildCacheKey(input: SearchRequest): string {
@@ -37,17 +61,25 @@ function buildCacheKey(input: SearchRequest): string {
   });
 }
 
-function buildDomainCandidates(input: SearchRequest, logos: Awaited<ReturnType<typeof scrapeNamelix>>) {
+export function buildDomainCandidates(
+  input: SearchRequest,
+  logos: Awaited<ReturnType<typeof scrapeNamelix>>,
+) {
   const candidates: DomainCandidate[] = [];
   const invalid: RawDomainResult[] = [];
   const seenDomains = new Set<string>();
+  const normalizedTld = normalizeTld(input.tld);
+
+  if (!normalizedTld) {
+    throw new Error("Invalid TLD after normalization.");
+  }
 
   for (const logo of logos) {
     const sourceName = logo.businessName;
     const isNamelixPremium = logo.name === "premium";
+    const label = normalizeBusinessNameToLabel(sourceName);
 
-    const domain = buildDomainFromBusinessName(sourceName, input.tld);
-    if (!domain) {
+    if (!label) {
       invalid.push({
         domain: `${sourceName} (invalid)`,
         sourceName,
@@ -59,6 +91,19 @@ function buildDomainCandidates(input: SearchRequest, logos: Awaited<ReturnType<t
       continue;
     }
 
+    if (label.length > input.maxLength) {
+      invalid.push({
+        domain: `${sourceName} (invalid)`,
+        sourceName,
+        isNamelixPremium,
+        available: false,
+        definitive: false,
+        reason: `Normalized label length ${label.length} exceeds maxLength ${input.maxLength}.`,
+      });
+      continue;
+    }
+
+    const domain = `${label}.${normalizedTld}`;
     if (seenDomains.has(domain)) {
       continue;
     }
@@ -74,6 +119,153 @@ function buildDomainCandidates(input: SearchRequest, logos: Awaited<ReturnType<t
   return {
     candidates,
     invalid,
+  };
+}
+
+function microsToPrice(micros?: number): number | undefined {
+  if (typeof micros !== "number") {
+    return undefined;
+  }
+
+  return Number((micros / 1_000_000).toFixed(2));
+}
+
+function toDomainResult(item: RawDomainResult, yearlyBudget: number): DomainResult {
+  const price = microsToPrice(item.priceMicros);
+  const overBudgetFlag = item.available && typeof price === "number" ? price > yearlyBudget : false;
+
+  return {
+    ...item,
+    price,
+    overBudget: overBudgetFlag,
+  };
+}
+
+function shouldReplaceByScore(existing: RankedDomainResult, next: RankedDomainResult): boolean {
+  if (next.overallScore !== existing.overallScore) {
+    return next.overallScore > existing.overallScore;
+  }
+
+  if (next.available !== existing.available) {
+    return next.available;
+  }
+
+  if ((next.price ?? Number.POSITIVE_INFINITY) !== (existing.price ?? Number.POSITIVE_INFINITY)) {
+    return (next.price ?? Number.POSITIVE_INFINITY) < (existing.price ?? Number.POSITIVE_INFINITY);
+  }
+
+  return next.domain.localeCompare(existing.domain) < 0;
+}
+
+function mergeAggregateEntry(
+  existing: RankedDomainResult | undefined,
+  candidate: RankedDomainResult,
+  loop: number,
+): RankedDomainResult {
+  if (!existing) {
+    return candidate;
+  }
+
+  const chosen = shouldReplaceByScore(existing, candidate) ? candidate : existing;
+  return {
+    ...chosen,
+    firstSeenLoop: existing.firstSeenLoop,
+    lastSeenLoop: loop,
+    timesDiscovered: existing.timesDiscovered + 1,
+  };
+}
+
+function parseDomainLabel(domain: string): string | null {
+  const index = domain.indexOf(".");
+  if (index <= 0) {
+    return null;
+  }
+
+  return domain.slice(0, index);
+}
+
+function normalizeLoopProgress(loop: number, totalLoops: number): number {
+  const ratio = totalLoops === 0 ? 1 : loop / totalLoops;
+  return Math.round(5 + ratio * 90);
+}
+
+async function runSingleIterationInput(input: SearchRequest): Promise<RawDomainResult[]> {
+  const cacheKey = buildCacheKey(input);
+  const cached = getCachedSearchResult(cacheKey);
+
+  if (cached) {
+    return cached.rawResults;
+  }
+
+  const logos = await scrapeNamelix(input);
+  const { candidates, invalid } = buildDomainCandidates(input, logos);
+
+  const availabilityMap =
+    candidates.length > 0
+      ? await checkAvailabilityBulk(candidates.map((candidate) => candidate.domain))
+      : new Map();
+
+  const rawResults: RawDomainResult[] = [
+    ...candidates.map((candidate) => {
+      const availability = availabilityMap.get(candidate.domain);
+
+      return {
+        domain: candidate.domain,
+        sourceName: candidate.sourceName,
+        isNamelixPremium: candidate.isNamelixPremium,
+        available: Boolean(availability?.available),
+        definitive: Boolean(availability?.definitive),
+        priceMicros: availability?.priceMicros,
+        currency: availability?.currency,
+        period: availability?.period,
+        reason: availability?.reason,
+      } satisfies RawDomainResult;
+    }),
+    ...invalid,
+  ];
+
+  setCachedSearchResult(cacheKey, rawResults);
+  return rawResults;
+}
+
+function scoreIterationResults(
+  rawResults: RawDomainResult[],
+  input: SearchRequest,
+  loop: number,
+): IterationResults {
+  const ranked: RankedDomainResult[] = [];
+
+  for (const item of rawResults) {
+    const result = toDomainResult(item, input.yearlyBudget);
+    const label = parseDomainLabel(result.domain);
+    if (!label || label.length > input.maxLength) {
+      continue;
+    }
+
+    const metrics = scoreDomainResult(result, input);
+    ranked.push({
+      ...result,
+      ...metrics,
+      firstSeenLoop: loop,
+      lastSeenLoop: loop,
+      timesDiscovered: 1,
+    });
+  }
+
+  const sorted = sortRankedDomains(ranked, "marketability");
+  const top = sorted[0];
+  const averageOverallScore =
+    sorted.length > 0
+      ? Number((sorted.reduce((sum, row) => sum + row.overallScore, 0) / sorted.length).toFixed(2))
+      : 0;
+
+  return {
+    ranked: sorted,
+    availableCount: sorted.filter((row) => row.available).length,
+    withinBudgetCount: sorted.filter((row) => row.available && !row.overBudget).length,
+    averageOverallScore,
+    topDomain: top?.domain,
+    topScore: top?.overallScore,
   };
 }
 
@@ -125,76 +317,79 @@ export async function runSearchJob(jobId: string): Promise<void> {
     return;
   }
 
-  const input = initialJob.input;
-  const cacheKey = buildCacheKey(input);
+  const baseInput = initialJob.input;
+  const totalLoops = baseInput.loopCount;
+  const aggregate = new Map<string, RankedDomainResult>();
+  const loopSummaries: LoopSummary[] = [];
+  const tuningHistory: TuningStep[] = [];
 
   try {
-    markJobRunning(jobId, "namelix", 10);
+    markJobRunning(jobId, "looping", 5);
+    patchJob(jobId, {
+      currentLoop: 0,
+      totalLoops,
+    });
 
-    let rawResults: RawDomainResult[] | undefined;
+    const modelState = await loadOptimizerModelState();
+    const optimizer = new DomainSearchOptimizer(baseInput, modelState);
 
-    const cached = getCachedSearchResult(cacheKey);
-    if (cached) {
-      rawResults = cached.rawResults;
-      patchJob(jobId, { phase: "finalize", progress: 85 });
-    }
+    for (let loop = 1; loop <= totalLoops; loop += 1) {
+      patchJob(jobId, {
+        status: "running",
+        phase: "looping",
+        progress: normalizeLoopProgress(loop - 1, totalLoops),
+        currentLoop: loop,
+        totalLoops,
+      });
 
-    if (!rawResults) {
-      const logos = await scrapeNamelix(input);
-      markJobRunning(jobId, "namelix", 45);
+      const plan = optimizer.nextLoop(loop);
+      const rawResults = await runSingleIterationInput(plan.input);
+      const scored = scoreIterationResults(rawResults, plan.input, loop);
 
-      const { candidates, invalid } = buildDomainCandidates(input, logos);
+      for (const row of scored.ranked) {
+        const label = parseDomainLabel(row.domain);
+        if (!label || label.length > plan.input.maxLength) {
+          continue;
+        }
+
+        const key = row.domain.toLowerCase();
+        const merged = mergeAggregateEntry(aggregate.get(key), row, loop);
+        aggregate.set(key, merged);
+      }
+
+      const reward = scoreRewardFromRankedScores(scored.ranked.map((row) => row.overallScore));
+      const tuningStep = optimizer.recordReward(plan, reward);
+      tuningHistory.push(tuningStep);
+
+      loopSummaries.push({
+        loop,
+        keywords: plan.input.keywords,
+        description: plan.input.description ?? "",
+        style: plan.selectedStyle,
+        randomness: plan.selectedRandomness,
+        mutationIntensity: plan.selectedMutationIntensity,
+        discoveredCount: scored.ranked.length,
+        availableCount: scored.availableCount,
+        withinBudgetCount: scored.withinBudgetCount,
+        averageOverallScore: scored.averageOverallScore,
+        topDomain: scored.topDomain,
+        topScore: scored.topScore,
+      });
 
       patchJob(jobId, {
         status: "running",
-        phase: "godaddy",
-        progress: 60,
+        phase: "looping",
+        progress: normalizeLoopProgress(loop, totalLoops),
+        currentLoop: loop,
+        totalLoops,
       });
-
-      const availabilityMap = await checkAvailabilityBulk(candidates.map((candidate) => candidate.domain));
-
-      rawResults = [
-        ...candidates.map((candidate) => {
-          const availability = availabilityMap.get(candidate.domain);
-
-          return {
-            domain: candidate.domain,
-            sourceName: candidate.sourceName,
-            isNamelixPremium: candidate.isNamelixPremium,
-            available: Boolean(availability?.available),
-            definitive: Boolean(availability?.definitive),
-            priceMicros: availability?.priceMicros,
-            currency: availability?.currency,
-            period: availability?.period,
-            reason: availability?.reason,
-          } satisfies RawDomainResult;
-        }),
-        ...invalid,
-      ];
-
-      // #region agent log
-      rawResults
-        .filter((r) => r.available)
-        .forEach((r) => {
-          fetch("http://127.0.0.1:7278/ingest/12c75e00-6c9a-482c-b25d-6079b2218f1d", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "1e9370" },
-            body: JSON.stringify({
-              sessionId: "1e9370",
-              location: "runner.ts:rawResultsBeforeClassify",
-              message: "Raw result (available)",
-              data: { domain: r.domain, priceMicros: r.priceMicros, isNamelixPremium: r.isNamelixPremium, hypothesisId: "B" },
-              timestamp: Date.now(),
-            }),
-          }).catch(() => {});
-        });
-      // #endregion
-
-      setCachedSearchResult(cacheKey, rawResults);
-      patchJob(jobId, { phase: "finalize", progress: 90 });
     }
 
-    const results = classifyDomainResults(rawResults, input.yearlyBudget);
+    const finalModelState = optimizer.snapshotModelState();
+    await saveOptimizerModelState(finalModelState);
+
+    const allRanked = sortRankedDomains(Array.from(aggregate.values()), "marketability");
+    const results = classifyRankedResults(allRanked, loopSummaries, tuningHistory);
     markJobComplete(jobId, results);
   } catch (error) {
     markJobFailed(jobId, mapErrorToJobError(error));

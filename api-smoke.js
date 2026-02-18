@@ -53,6 +53,7 @@ async function main() {
     tld: "com",
     maxNames: 2,
     yearlyBudget: 50,
+    loopCount: 1,
   });
   const postRes = await request("POST", "/api/searches", body);
   if (postRes.status !== 202 || !postRes.data || !postRes.data.jobId) {

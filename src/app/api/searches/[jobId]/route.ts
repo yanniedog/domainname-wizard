@@ -28,6 +28,8 @@ export async function GET(_request: Request, { params }: Params) {
       status: job.status,
       phase: job.phase,
       progress: job.progress,
+      currentLoop: job.currentLoop,
+      totalLoops: job.totalLoops,
       results: job.results,
       error: job.error,
       createdAt: job.createdAt,
