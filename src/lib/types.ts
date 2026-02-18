@@ -80,6 +80,13 @@ export interface LoopSummary {
   style: StyleValue;
   randomness: RandomnessValue;
   mutationIntensity: MutationIntensityValue;
+  requiredQuota: number;
+  quotaMet: boolean;
+  skipped: boolean;
+  limitHit: boolean;
+  skipReason?: string;
+  consideredCount: number;
+  batchCount: number;
   discoveredCount: number;
   availableCount: number;
   withinBudgetCount: number;

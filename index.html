@@ -204,9 +204,9 @@
 
       function renderLoopSummary(rows) {
         if (!rows || !rows.length) return "<p>(none)</p>";
-        var h = "<div class=\"table-wrap\"><table><thead><tr><th>Loop</th><th>Keywords</th><th>Description</th><th>Style</th><th>Randomness</th><th>Mutation</th><th>Discovered</th><th>Available</th><th>Within Budget</th><th>Avg Score</th><th>Top Domain</th></tr></thead><tbody>";
+        var h = "<div class=\"table-wrap\"><table><thead><tr><th>Loop</th><th>Required</th><th>Available</th><th>Quota Met</th><th>251 Hit</th><th>Considered</th><th>Batches</th><th>Keywords</th><th>Description</th><th>Style</th><th>Randomness</th><th>Mutation</th><th>Within Budget</th><th>Avg Score</th><th>Top Domain</th><th>Note</th></tr></thead><tbody>";
         rows.forEach(function (r) {
-          h += "<tr><td>" + r.loop + "</td><td>" + escapeHtml(r.keywords || "-") + "</td><td>" + escapeHtml(r.description || "-") + "</td><td>" + escapeHtml(r.style) + "</td><td>" + escapeHtml(r.randomness) + "</td><td>" + escapeHtml(r.mutationIntensity) + "</td><td>" + r.discoveredCount + "</td><td>" + r.availableCount + "</td><td>" + r.withinBudgetCount + "</td><td>" + score(r.averageOverallScore) + "</td><td>" + escapeHtml(r.topDomain || "-") + "</td></tr>";
+          h += "<tr><td>" + r.loop + "</td><td>" + (r.requiredQuota || 0) + "</td><td>" + (r.availableCount || 0) + "</td><td>" + (r.quotaMet ? "Yes" : "No") + "</td><td>" + (r.limitHit ? "Yes" : "No") + "</td><td>" + (r.consideredCount || 0) + "</td><td>" + (r.batchCount || 0) + "</td><td>" + escapeHtml(r.keywords || "-") + "</td><td>" + escapeHtml(r.description || "-") + "</td><td>" + escapeHtml(r.style) + "</td><td>" + escapeHtml(r.randomness) + "</td><td>" + escapeHtml(r.mutationIntensity) + "</td><td>" + (r.withinBudgetCount || 0) + "</td><td>" + score(r.averageOverallScore) + "</td><td>" + escapeHtml(r.topDomain || "-") + "</td><td>" + escapeHtml(r.skipReason || "-") + "</td></tr>";
         });
         return h + "</tbody></table></div>";
       }
@@ -233,7 +233,6 @@
         html += renderRankedTable(ranked);
         html += "<h3>Within Budget (" + (results.withinBudget || []).length + ")</h3>" + renderBudgetTable(results.withinBudget || []);
         html += "<h3>Over Budget (" + (results.overBudget || []).length + ")</h3>" + renderBudgetTable(results.overBudget || []);
-        html += "<h3>Unavailable / Unknown (" + (results.unavailable || []).length + ")</h3>" + renderBudgetTable(results.unavailable || []);
         html += "<h3>Loop Summaries (" + (results.loopSummaries || []).length + ")</h3>" + renderLoopSummary(results.loopSummaries || []);
         resultsEl.innerHTML = html;
 

@@ -117,21 +117,19 @@ export function classifyRankedResults(
   loopSummaries: LoopSummary[],
   tuningHistory: TuningStep[],
 ): SearchResults {
-  const withinBudget = rankedResults
-    .filter((result) => result.available && !result.overBudget)
+  const availableRanked = rankedResults.filter((result) => result.available);
+  const withinBudget = availableRanked
+    .filter((result) => !result.overBudget)
     .sort(sortRankedByPriceAscending);
-  const overBudget = rankedResults
-    .filter((result) => result.available && result.overBudget)
+  const overBudget = availableRanked
+    .filter((result) => result.overBudget)
     .sort(sortRankedByPriceAscending);
-  const unavailable = rankedResults
-    .filter((result) => !result.available)
-    .sort((a, b) => a.domain.localeCompare(b.domain));
 
   return {
     withinBudget,
     overBudget,
-    unavailable,
-    allRanked: rankedResults,
+    unavailable: [],
+    allRanked: availableRanked,
     loopSummaries,
     tuningHistory,
   };

@@ -202,7 +202,6 @@ export default function Page() {
   const [job, setJob] = useState<SearchJobResponse | null>(null);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [showOverBudget, setShowOverBudget] = useState(false);
-  const [showUnavailable, setShowUnavailable] = useState(false);
   const [sortMode, setSortMode] = useState<DomainSortMode>("marketability");
 
   useEffect(() => {
@@ -266,7 +265,6 @@ export default function Page() {
     setJob(null);
     setJobId(null);
     setShowOverBudget(false);
-    setShowUnavailable(false);
     setSortMode("marketability");
 
     try {
@@ -481,46 +479,48 @@ export default function Page() {
               </h3>
               {showOverBudget && <BudgetTable rows={job.results.overBudget} />}
 
-              <h3>
-                Unavailable / Unknown ({job.results.unavailable.length})
-                <button type="button" onClick={() => setShowUnavailable((previous) => !previous)}>
-                  {showUnavailable ? "Hide" : "Show"}
-                </button>
-              </h3>
-              {showUnavailable && <BudgetTable rows={job.results.unavailable} />}
-
               <h3>Loop Summaries ({job.results.loopSummaries.length})</h3>
               <div className="table-wrap">
                 <table>
                   <thead>
                     <tr>
                       <th>Loop</th>
+                      <th>Required Quota</th>
+                      <th>Available Collected</th>
+                      <th>Quota Met</th>
+                      <th>251 Hit</th>
+                      <th>Considered</th>
+                      <th>Batches</th>
                       <th>Keywords</th>
                       <th>Description</th>
                       <th>Style</th>
                       <th>Randomness</th>
                       <th>Mutation</th>
-                      <th>Discovered</th>
-                      <th>Available</th>
                       <th>Within Budget</th>
                       <th>Avg Score</th>
                       <th>Top Domain</th>
+                      <th>Note</th>
                     </tr>
                   </thead>
                   <tbody>
                     {job.results.loopSummaries.map((summary) => (
                       <tr key={summary.loop}>
                         <td>{summary.loop}</td>
+                        <td>{summary.requiredQuota}</td>
+                        <td>{summary.availableCount}</td>
+                        <td>{summary.quotaMet ? "Yes" : "No"}</td>
+                        <td>{summary.limitHit ? "Yes" : "No"}</td>
+                        <td>{summary.consideredCount}</td>
+                        <td>{summary.batchCount}</td>
                         <td>{summary.keywords}</td>
                         <td>{summary.description || "-"}</td>
                         <td>{summary.style}</td>
                         <td>{summary.randomness}</td>
                         <td>{summary.mutationIntensity}</td>
-                        <td>{summary.discoveredCount}</td>
-                        <td>{summary.availableCount}</td>
                         <td>{summary.withinBudgetCount}</td>
                         <td>{summary.averageOverallScore.toFixed(1)}</td>
                         <td>{summary.topDomain ?? "-"}</td>
+                        <td>{summary.skipReason ?? "-"}</td>
                       </tr>
                     ))}
                   </tbody>

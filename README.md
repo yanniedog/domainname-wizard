@@ -13,6 +13,9 @@ Namelix-to-GoDaddy iterative domain optimizer.
   - Evolutionary keyword/description mutation.
   - Epsilon-greedy bandit selection for style/randomness/mutation intensity.
   - Local persistent learning model in `data/optimizer-state.json`.
+- Streams live progress and incremental result snapshots during each loop and after each loop.
+- Keeps only currently available domains in ranked/budget tables and quota accounting.
+- Per-loop quota target is `maxNames` available domains; if `251` considered names is reached, the loop is flagged and partial available results are kept.
 - Scores every discovered domain with:
   - `marketabilityScore` (memorability/brandability factors).
   - `financialValueScore` (availability/price/budget factors).

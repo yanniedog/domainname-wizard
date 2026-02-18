@@ -1,22 +1,11 @@
-import {
-  normalizeBusinessNameToLabel,
-  normalizeTld,
-} from "@/lib/domain/normalize";
+import { normalizeBusinessNameToLabel, normalizeTld } from "@/lib/domain/normalize";
 import {
   GoDaddyApiError,
   GoDaddyAuthError,
   GoDaddyRateLimitError,
   checkAvailabilityBulk,
 } from "@/lib/godaddy/client";
-import {
-  getCachedSearchResult,
-  getJob,
-  markJobComplete,
-  markJobFailed,
-  markJobRunning,
-  patchJob,
-  setCachedSearchResult,
-} from "@/lib/jobs/store";
+import { getJob, markJobComplete, markJobFailed, markJobRunning, patchJob } from "@/lib/jobs/store";
 import { NamelixScrapeError, scrapeNamelix } from "@/lib/namelix/scraper";
 import { classifyRankedResults } from "@/lib/search/classify";
 import { loadOptimizerModelState, saveOptimizerModelState } from "@/lib/search/model-store";
@@ -26,9 +15,11 @@ import { sortRankedDomains } from "@/lib/search/sort";
 import type {
   DomainResult,
   JobError,
+  JobPhase,
   LoopSummary,
   RankedDomainResult,
   RawDomainResult,
+  SearchResults,
   SearchRequest,
   TuningStep,
 } from "@/lib/types";
@@ -48,18 +39,18 @@ interface IterationResults {
   topScore?: number;
 }
 
-function buildCacheKey(input: SearchRequest): string {
-  return JSON.stringify({
-    keywords: input.keywords.trim().toLowerCase(),
-    description: (input.description ?? "").trim().toLowerCase(),
-    style: input.style,
-    randomness: input.randomness,
-    blacklist: (input.blacklist ?? "").trim().toLowerCase(),
-    maxLength: input.maxLength,
-    tld: input.tld.trim().toLowerCase().replace(/^\./, ""),
-    maxNames: input.maxNames,
-  });
+interface LoopRunState {
+  rawAvailable: RawDomainResult[];
+  consideredCount: number;
+  batchCount: number;
+  limitHit: boolean;
+  quotaMet: boolean;
+  skipReason?: string;
 }
+
+const LOOP_CONSIDERED_LIMIT = 251;
+const LOOP_MAX_STALLED_BATCHES = 3;
+const LOOP_MAX_BATCH_ATTEMPTS = 12;
 
 export function buildDomainCandidates(
   input: SearchRequest,
@@ -122,6 +113,19 @@ export function buildDomainCandidates(
   };
 }
 
+function clamp(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, value));
+}
+
+function parseDomainLabel(domain: string): string | null {
+  const index = domain.indexOf(".");
+  if (index <= 0) {
+    return null;
+  }
+
+  return domain.slice(0, index);
+}
+
 function microsToPrice(micros?: number): number | undefined {
   if (typeof micros !== "number") {
     return undefined;
@@ -144,10 +148,6 @@ function toDomainResult(item: RawDomainResult, yearlyBudget: number): DomainResu
 function shouldReplaceByScore(existing: RankedDomainResult, next: RankedDomainResult): boolean {
   if (next.overallScore !== existing.overallScore) {
     return next.overallScore > existing.overallScore;
-  }
-
-  if (next.available !== existing.available) {
-    return next.available;
   }
 
   if ((next.price ?? Number.POSITIVE_INFINITY) !== (existing.price ?? Number.POSITIVE_INFINITY)) {
@@ -175,57 +175,46 @@ function mergeAggregateEntry(
   };
 }
 
-function parseDomainLabel(domain: string): string | null {
-  const index = domain.indexOf(".");
-  if (index <= 0) {
-    return null;
-  }
+function mergeRowsIntoAggregate(
+  aggregate: Map<string, RankedDomainResult>,
+  rows: RankedDomainResult[],
+  loop: number,
+): void {
+  for (const row of rows) {
+    const label = parseDomainLabel(row.domain);
+    if (!label) {
+      continue;
+    }
 
-  return domain.slice(0, index);
+    const key = row.domain.toLowerCase();
+    const merged = mergeAggregateEntry(aggregate.get(key), row, loop);
+    aggregate.set(key, merged);
+  }
 }
 
-function normalizeLoopProgress(loop: number, totalLoops: number): number {
-  const ratio = totalLoops === 0 ? 1 : loop / totalLoops;
-  return Math.round(5 + ratio * 90);
+function buildResultsSnapshot(
+  aggregate: Map<string, RankedDomainResult>,
+  loopSummaries: LoopSummary[],
+  tuningHistory: TuningStep[],
+): SearchResults {
+  const allRanked = sortRankedDomains(Array.from(aggregate.values()), "marketability");
+  return classifyRankedResults(allRanked, loopSummaries, tuningHistory);
 }
 
-async function runSingleIterationInput(input: SearchRequest): Promise<RawDomainResult[]> {
-  const cacheKey = buildCacheKey(input);
-  const cached = getCachedSearchResult(cacheKey);
+function buildBatchMaxNames(requiredRemaining: number, configuredMaxNames: number): number {
+  const candidate = Math.max(requiredRemaining * 3, requiredRemaining, Math.min(configuredMaxNames, 80));
+  return clamp(Math.floor(candidate), requiredRemaining, 250);
+}
 
-  if (cached) {
-    return cached.rawResults;
+function calculateLoopProgress(totalLoops: number, currentLoop: number, loopFraction: number): number {
+  if (totalLoops <= 0) {
+    return 100;
   }
 
-  const logos = await scrapeNamelix(input);
-  const { candidates, invalid } = buildDomainCandidates(input, logos);
-
-  const availabilityMap =
-    candidates.length > 0
-      ? await checkAvailabilityBulk(candidates.map((candidate) => candidate.domain))
-      : new Map();
-
-  const rawResults: RawDomainResult[] = [
-    ...candidates.map((candidate) => {
-      const availability = availabilityMap.get(candidate.domain);
-
-      return {
-        domain: candidate.domain,
-        sourceName: candidate.sourceName,
-        isNamelixPremium: candidate.isNamelixPremium,
-        available: Boolean(availability?.available),
-        definitive: Boolean(availability?.definitive),
-        priceMicros: availability?.priceMicros,
-        currency: availability?.currency,
-        period: availability?.period,
-        reason: availability?.reason,
-      } satisfies RawDomainResult;
-    }),
-    ...invalid,
-  ];
-
-  setCachedSearchResult(cacheKey, rawResults);
-  return rawResults;
+  const completedLoops = Math.max(0, currentLoop - 1);
+  const fractionWithinLoop = clamp(loopFraction, 0, 1);
+  const normalized = (completedLoops + fractionWithinLoop) / totalLoops;
+  return Math.round(5 + normalized * 90);
 }
 
 function scoreIterationResults(
@@ -237,6 +226,10 @@ function scoreIterationResults(
 
   for (const item of rawResults) {
     const result = toDomainResult(item, input.yearlyBudget);
+    if (!result.available) {
+      continue;
+    }
+
     const label = parseDomainLabel(result.domain);
     if (!label || label.length > input.maxLength) {
       continue;
@@ -261,11 +254,45 @@ function scoreIterationResults(
 
   return {
     ranked: sorted,
-    availableCount: sorted.filter((row) => row.available).length,
-    withinBudgetCount: sorted.filter((row) => row.available && !row.overBudget).length,
+    availableCount: sorted.length,
+    withinBudgetCount: sorted.filter((row) => !row.overBudget).length,
     averageOverallScore,
     topDomain: top?.domain,
     topScore: top?.overallScore,
+  };
+}
+
+function buildLoopSummary(
+  loop: number,
+  input: SearchRequest,
+  selected: {
+    style: LoopSummary["style"];
+    randomness: LoopSummary["randomness"];
+    mutationIntensity: LoopSummary["mutationIntensity"];
+  },
+  state: LoopRunState,
+  scored: IterationResults,
+): LoopSummary {
+  return {
+    loop,
+    keywords: input.keywords,
+    description: input.description ?? "",
+    style: selected.style,
+    randomness: selected.randomness,
+    mutationIntensity: selected.mutationIntensity,
+    requiredQuota: input.maxNames,
+    quotaMet: state.quotaMet,
+    skipped: !state.quotaMet,
+    limitHit: state.limitHit,
+    skipReason: state.skipReason,
+    consideredCount: state.consideredCount,
+    batchCount: state.batchCount,
+    discoveredCount: scored.ranked.length,
+    availableCount: scored.availableCount,
+    withinBudgetCount: scored.withinBudgetCount,
+    averageOverallScore: scored.averageOverallScore,
+    topDomain: scored.topDomain,
+    topScore: scored.topScore,
   };
 }
 
@@ -311,6 +338,10 @@ function mapErrorToJobError(error: unknown): JobError {
   };
 }
 
+function getLivePhase(batchCount: number): JobPhase {
+  return batchCount === 0 ? "namelix" : "godaddy";
+}
+
 export async function runSearchJob(jobId: string): Promise<void> {
   const initialJob = getJob(jobId);
   if (!initialJob) {
@@ -328,68 +359,201 @@ export async function runSearchJob(jobId: string): Promise<void> {
     patchJob(jobId, {
       currentLoop: 0,
       totalLoops,
+      results: buildResultsSnapshot(aggregate, loopSummaries, tuningHistory),
     });
 
     const modelState = await loadOptimizerModelState();
     const optimizer = new DomainSearchOptimizer(baseInput, modelState);
 
     for (let loop = 1; loop <= totalLoops; loop += 1) {
-      patchJob(jobId, {
-        status: "running",
-        phase: "looping",
-        progress: normalizeLoopProgress(loop - 1, totalLoops),
-        currentLoop: loop,
-        totalLoops,
-      });
-
       const plan = optimizer.nextLoop(loop);
-      const rawResults = await runSingleIterationInput(plan.input);
-      const scored = scoreIterationResults(rawResults, plan.input, loop);
+      const seenDomains = new Set<string>();
+      const loopRawAvailable: RawDomainResult[] = [];
+      let consideredCount = 0;
+      let batchCount = 0;
+      let limitHit = false;
+      let stalledBatches = 0;
+      let skipReason: string | undefined;
 
-      for (const row of scored.ranked) {
-        const label = parseDomainLabel(row.domain);
-        if (!label || label.length > plan.input.maxLength) {
-          continue;
+      while (loopRawAvailable.length < plan.input.maxNames) {
+        if (consideredCount >= LOOP_CONSIDERED_LIMIT) {
+          limitHit = true;
+          skipReason = `Considered-name cap of ${LOOP_CONSIDERED_LIMIT} reached.`;
+          break;
         }
 
-        const key = row.domain.toLowerCase();
-        const merged = mergeAggregateEntry(aggregate.get(key), row, loop);
-        aggregate.set(key, merged);
+        if (batchCount >= LOOP_MAX_BATCH_ATTEMPTS) {
+          skipReason = `Batch attempt cap (${LOOP_MAX_BATCH_ATTEMPTS}) reached before quota.`;
+          break;
+        }
+
+        const remaining = plan.input.maxNames - loopRawAvailable.length;
+        const loopFractionPreScrape = 0.05 + 0.8 * (loopRawAvailable.length / Math.max(1, plan.input.maxNames));
+        patchJob(jobId, {
+          status: "running",
+          phase: "namelix",
+          progress: calculateLoopProgress(totalLoops, loop, loopFractionPreScrape),
+          currentLoop: loop,
+          totalLoops,
+          results: buildResultsSnapshot(aggregate, loopSummaries, tuningHistory),
+        });
+
+        const batchInput: SearchRequest = {
+          ...plan.input,
+          maxNames: buildBatchMaxNames(remaining, plan.input.maxNames),
+        };
+        const logos = await scrapeNamelix(batchInput);
+        const { candidates } = buildDomainCandidates(plan.input, logos);
+
+        const freshCandidates = candidates.filter((candidate) => {
+          const key = candidate.domain.toLowerCase();
+          if (seenDomains.has(key)) {
+            return false;
+          }
+
+          seenDomains.add(key);
+          return true;
+        });
+
+        consideredCount += freshCandidates.length;
+        batchCount += 1;
+
+        if (consideredCount >= LOOP_CONSIDERED_LIMIT) {
+          limitHit = true;
+          skipReason = `Considered-name cap of ${LOOP_CONSIDERED_LIMIT} reached.`;
+        }
+
+        if (freshCandidates.length === 0) {
+          stalledBatches += 1;
+        } else {
+          patchJob(jobId, {
+            status: "running",
+            phase: "godaddy",
+            progress: calculateLoopProgress(totalLoops, loop, loopFractionPreScrape + 0.04),
+            currentLoop: loop,
+            totalLoops,
+            results: buildResultsSnapshot(aggregate, loopSummaries, tuningHistory),
+          });
+
+          const availabilityMap = await checkAvailabilityBulk(freshCandidates.map((candidate) => candidate.domain));
+          let batchAvailableCount = 0;
+
+          for (const candidate of freshCandidates) {
+            const availability = availabilityMap.get(candidate.domain);
+            if (!availability?.available) {
+              continue;
+            }
+
+            batchAvailableCount += 1;
+            loopRawAvailable.push({
+              domain: candidate.domain,
+              sourceName: candidate.sourceName,
+              isNamelixPremium: candidate.isNamelixPremium,
+              available: true,
+              definitive: Boolean(availability.definitive),
+              priceMicros: availability.priceMicros,
+              currency: availability.currency,
+              period: availability.period,
+              reason: availability.reason,
+            });
+
+            if (loopRawAvailable.length >= plan.input.maxNames) {
+              break;
+            }
+          }
+
+          stalledBatches = batchAvailableCount === 0 ? stalledBatches + 1 : 0;
+        }
+
+        const liveState: LoopRunState = {
+          rawAvailable: loopRawAvailable,
+          consideredCount,
+          batchCount,
+          limitHit,
+          quotaMet: loopRawAvailable.length >= plan.input.maxNames,
+          skipReason,
+        };
+        const liveScored = scoreIterationResults(loopRawAvailable, plan.input, loop);
+        const previewAggregate = new Map(aggregate);
+        mergeRowsIntoAggregate(previewAggregate, liveScored.ranked, loop);
+        const liveSummary = buildLoopSummary(
+          loop,
+          plan.input,
+          {
+            style: plan.selectedStyle,
+            randomness: plan.selectedRandomness,
+            mutationIntensity: plan.selectedMutationIntensity,
+          },
+          liveState,
+          liveScored,
+        );
+
+        patchJob(jobId, {
+          status: "running",
+          phase: getLivePhase(batchCount),
+          progress: calculateLoopProgress(
+            totalLoops,
+            loop,
+            0.12 + 0.82 * (loopRawAvailable.length / Math.max(1, plan.input.maxNames)),
+          ),
+          currentLoop: loop,
+          totalLoops,
+          results: buildResultsSnapshot(previewAggregate, [...loopSummaries, liveSummary], tuningHistory),
+        });
+
+        if (limitHit) {
+          break;
+        }
+
+        if (stalledBatches >= LOOP_MAX_STALLED_BATCHES) {
+          skipReason = `No newly available domains across ${LOOP_MAX_STALLED_BATCHES} consecutive batches.`;
+          break;
+        }
       }
+
+      const loopState: LoopRunState = {
+        rawAvailable: loopRawAvailable,
+        consideredCount,
+        batchCount,
+        limitHit,
+        quotaMet: loopRawAvailable.length >= plan.input.maxNames,
+        skipReason,
+      };
+
+      const scored = scoreIterationResults(loopRawAvailable, plan.input, loop);
+      mergeRowsIntoAggregate(aggregate, scored.ranked, loop);
 
       const reward = scoreRewardFromRankedScores(scored.ranked.map((row) => row.overallScore));
       const tuningStep = optimizer.recordReward(plan, reward);
       tuningHistory.push(tuningStep);
 
-      loopSummaries.push({
+      const loopSummary = buildLoopSummary(
         loop,
-        keywords: plan.input.keywords,
-        description: plan.input.description ?? "",
-        style: plan.selectedStyle,
-        randomness: plan.selectedRandomness,
-        mutationIntensity: plan.selectedMutationIntensity,
-        discoveredCount: scored.ranked.length,
-        availableCount: scored.availableCount,
-        withinBudgetCount: scored.withinBudgetCount,
-        averageOverallScore: scored.averageOverallScore,
-        topDomain: scored.topDomain,
-        topScore: scored.topScore,
-      });
+        plan.input,
+        {
+          style: plan.selectedStyle,
+          randomness: plan.selectedRandomness,
+          mutationIntensity: plan.selectedMutationIntensity,
+        },
+        loopState,
+        scored,
+      );
+      loopSummaries.push(loopSummary);
 
       patchJob(jobId, {
         status: "running",
         phase: "looping",
-        progress: normalizeLoopProgress(loop, totalLoops),
+        progress: calculateLoopProgress(totalLoops, loop, 1),
         currentLoop: loop,
         totalLoops,
+        results: buildResultsSnapshot(aggregate, loopSummaries, tuningHistory),
       });
     }
 
     const finalModelState = optimizer.snapshotModelState();
     await saveOptimizerModelState(finalModelState);
 
-    const allRanked = sortRankedDomains(Array.from(aggregate.values()), "marketability");
-    const results = classifyRankedResults(allRanked, loopSummaries, tuningHistory);
+    const results = buildResultsSnapshot(aggregate, loopSummaries, tuningHistory);
     markJobComplete(jobId, results);
   } catch (error) {
     markJobFailed(jobId, mapErrorToJobError(error));
