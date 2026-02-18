@@ -172,6 +172,24 @@ export async function runSearchJob(jobId: string): Promise<void> {
         ...invalid,
       ];
 
+      // #region agent log
+      rawResults
+        .filter((r) => r.available)
+        .forEach((r) => {
+          fetch("http://127.0.0.1:7278/ingest/12c75e00-6c9a-482c-b25d-6079b2218f1d", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "1e9370" },
+            body: JSON.stringify({
+              sessionId: "1e9370",
+              location: "runner.ts:rawResultsBeforeClassify",
+              message: "Raw result (available)",
+              data: { domain: r.domain, priceMicros: r.priceMicros, isNamelixPremium: r.isNamelixPremium, hypothesisId: "B" },
+              timestamp: Date.now(),
+            }),
+          }).catch(() => {});
+        });
+      // #endregion
+
       setCachedSearchResult(cacheKey, rawResults);
       patchJob(jobId, { phase: "finalize", progress: 90 });
     }

@@ -43,6 +43,19 @@ export function classifyDomainResults(
     }
 
     if (overBudgetFlag) {
+      // #region agent log
+      fetch("http://127.0.0.1:7278/ingest/12c75e00-6c9a-482c-b25d-6079b2218f1d", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "1e9370" },
+        body: JSON.stringify({
+          sessionId: "1e9370",
+          location: "classify.ts:overBudgetEntry",
+          message: "Overbudget row",
+          data: { domain: result.domain, price: result.price, priceMicros: item.priceMicros, hypothesisId: "C" },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
       overBudget.push(result);
       continue;
     }
