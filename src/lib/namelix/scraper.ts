@@ -42,17 +42,40 @@ async function applyFormInputs(page: Page, input: SearchRequest): Promise<void> 
   const tld = input.tld.toLowerCase().replace(/^\./, "");
 
   await page.locator(`#style-${input.style}`).check({ force: true });
-  await page.locator(`#radio-random-${input.randomness}`).check({ force: true });
 
-  await page.locator("#keywords").fill(input.keywords);
+  // Radio is hidden with opacity:0 / 0x0 size; set via JS so Playwright visibility check does not fail.
+  await page.evaluate((randomness: string) => {
+    const el = document.querySelector(`#radio-random-${randomness}`) as HTMLInputElement | null;
+    if (el && el.type === "radio") {
+      el.checked = true;
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  }, input.randomness);
 
-  const descriptionInput = page.locator("#description");
-  if ((await descriptionInput.count()) > 0) {
-    await descriptionInput.fill(input.description ?? "");
-  }
-
-  await page.locator("#blacklist").fill(input.blacklist ?? "");
-  await page.locator("#length_range").fill(String(input.maxLength));
+  // Form inputs can be hidden (opacity/off-screen); set via JS so Playwright visibility does not block.
+  await page.evaluate(
+    (payload: { keywords: string; description: string; blacklist: string; lengthRange: string }) => {
+      const setInput = (id: string, value: string) => {
+        const el = document.querySelector(`#${id}`) as HTMLInputElement | null;
+        if (el) {
+          el.value = value;
+          el.dispatchEvent(new Event("input", { bubbles: true }));
+          el.dispatchEvent(new Event("change", { bubbles: true }));
+        }
+      };
+      setInput("keywords", payload.keywords);
+      setInput("description", payload.description);
+      setInput("blacklist", payload.blacklist);
+      setInput("length_range", payload.lengthRange);
+    },
+    {
+      keywords: input.keywords,
+      description: input.description ?? "",
+      blacklist: input.blacklist ?? "",
+      lengthRange: String(input.maxLength),
+    },
+  );
 
   await page.evaluate((normalizedTld) => {
     const app = (window as unknown as { namelix?: any }).namelix;
@@ -66,10 +89,14 @@ async function applyFormInputs(page: Page, input: SearchRequest): Promise<void> 
     app.random = app.random || "medium";
   }, tld);
 
-  const extensionLocator = page.locator(`#ext-${tld}`);
-  if ((await extensionLocator.count()) > 0) {
-    await extensionLocator.check({ force: true });
-  }
+  await page.evaluate((extId: string) => {
+    const el = document.querySelector(`#ext-${extId}`) as HTMLInputElement | null;
+    if (el && (el.type === "radio" || el.type === "checkbox")) {
+      el.checked = true;
+      el.dispatchEvent(new Event("change", { bubbles: true }));
+      el.dispatchEvent(new Event("input", { bubbles: true }));
+    }
+  }, tld);
 }
 
 async function triggerGeneration(page: Page): Promise<void> {
