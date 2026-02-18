@@ -10,7 +10,8 @@
     "test:watch": "vitest",
     "playwright:install": "playwright install chromium",
     "debug:wizard": "node debug-wizard-run.js",
-    "full-test": "node full-test.js"
+    "full-test": "node full-test.js",
+    "search:once": "node run-search-once.js"
   },
   "dependencies": {
     "next": "^16.1.6",
